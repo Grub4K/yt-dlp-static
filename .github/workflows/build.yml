@@ -6,50 +6,59 @@ permissions:
   contents: read
 
 jobs:
+  # Something like this would be inside `build.yml`
   build_musl:
-    permissions:
-      contents: read
-      packages: write
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        architecture:
-          # - armv7
-          - aarch64
-
+    outputs:
+      version: ${{ steps.build.outputs.version }}
     steps:
-      - uses: actions/checkout@v3
-        with:
-          repository: yt-dlp/yt-dlp
-          path: ./repo
-
-      - name: Virtualized Install, Prepare & Build
-        uses: yt-dlp/run-on-arch-action@v2
-        with:
-          env: |
-            GITHUB_WORKFLOW: build
-          githubToken: ${{ github.token }}
-          arch: ${{ matrix.architecture }}
-          distro: alpine_latest
-          dockerRunArgs: --volume "${PWD}/repo:/repo"
-          install: |
-            apk update
-            apk add git python3 scons g++ patchelf binutils
-            python3 -m venv .venv
-            ./.venv/bin/activate
-            python3 -m pip install -U pyinstaller staticx
-            # TODO: requirements
-
-          run: |
-            cd /repo
-            python3 -m pip install -U Pyinstaller -r requirements.txt
-            python3 devscripts/make_lazy_extractors.py
-            python3 pyinst.py --name yt-dlp_musl
-            staticx dist/yt-dlp_musl dist/yt-dlp_musl_1
-            mv -f dist/yt-dlp_musl dist/yt-dlp_musl
+      - uses: actions/checkout@v4
+      - name: Build using Dockerfile
+        id: build
+        env:
+          version: ${{ inputs.version }}
+        run: |
+          docker compose up --build --exit-code-from build-static
+          version="$(./build/yt-dlp_static --version)"
+          cat << EOF | tee -a "${GITHUB_OUTPUT}"
+          version=${version}
+          EOF
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
+          name: build-static-${{ github.job }}
           path: |
-            repo/dist/yt-dlp*
+            ./build/yt-dlp*
+          compression-level: 0
+
+  # This would be handled automatically through current `release.yml`
+  release:
+    needs: [build_musl]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifact
+          pattern: build-*
+          merge-multiple: true
+      - name: Verification stuff
+        run: |
+          sha256sum artifact/yt-dlp_static
+          sha512sum artifact/yt-dlp_static
+          chmod +x artifact/yt-dlp_static
+          artifact/yt-dlp_static -v || true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          version: ${{ needs.build_musl.outputs.version }}
+        run: |
+          gh release create \
+            --notes "***Experimental*** static musl libc yt-dlp build release" \
+            --title "yt-dlp_static v${{ env.version }}" \
+            --latest \
+            v${{ env.version }} \
+            artifact/*
