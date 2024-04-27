@@ -1,0 +1,7 @@
+services:
+  build-static:
+    build:
+      context: .
+      target: build
+    volumes:
+      - ./build:/build
